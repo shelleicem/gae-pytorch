@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.modules.module import Module
 from torch.nn.parameter import Parameter
-
+import torch.nn as nn
 
 class GraphConvolution(Module):
     """
@@ -32,3 +32,22 @@ class GraphConvolution(Module):
         return self.__class__.__name__ + ' (' \
                + str(self.in_features) + ' -> ' \
                + str(self.out_features) + ')'
+
+class GraphConvolutionbatch(nn.Module):
+    def __init__(self, input_dim, output_dim, dropout, act=F.relu):
+        super(GraphConvolutionbatch, self).__init__()
+        self.weight = nn.Parameter(torch.FloatTensor(input_dim, output_dim))
+        self.dropout = dropout
+        self.act = act
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.weight)
+
+    def forward(self, x, adj):
+        # x: (batch_size, n, input_dim)
+        # adj: (batch_size, n, n)
+        x = F.dropout(x, self.dropout, training=self.training)
+        support = torch.bmm(x, self.weight.unsqueeze(0).expand(x.size(0), -1, -1))
+        out = torch.bmm(adj, support)
+        return self.act(out)
