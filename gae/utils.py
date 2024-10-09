@@ -12,7 +12,7 @@ from sklearn.metrics import roc_auc_score, average_precision_score
 import numpy as np
 import os
 
-def load_and_save_data(file_path, threshold=0.2, train_ratio=0.8, val_ratio=0.1, save_path="output/", save_name="data.npz"):
+def load_and_save_data(file_path, threshold=0.2, train_ratio=0.8, val_ratio=0.1, save_path="/root/autodl-tmp/.autodl/", save_name="data.npz"):
     """
     加载邻接矩阵数据，生成特征张量，并划分训练集、验证集和测试集，保存结果为 .npz 文件。
 
@@ -308,6 +308,38 @@ def preprocess_graph(adj):
     # return sparse_to_tuple(adj_normalized)
     return sparse_mx_to_torch_sparse_tensor(adj_normalized)
 
+def preprocess_graph_batches(adj_batch):
+    """
+    对批量邻接矩阵 adj_batch 进行归一化处理，并返回 PyTorch 稠密张量。
+    :param adj_batch: 形状为 (batch_size, n, n) 的邻接矩阵张量
+    :return: 归一化后的邻接矩阵，形状为 (batch_size, n, n) 的 PyTorch 稠密张量
+    """
+    batch_size = adj_batch.shape[0]
+    n = adj_batch.shape[1]
+
+    adj_normalized_list = []
+
+    for i in range(batch_size):
+        # 对第 i 个邻接矩阵进行处理
+        adj = sp.coo_matrix(adj_batch[i])
+        adj_ = adj + sp.eye(adj.shape[0])  # 添加自连接
+
+        # 计算度矩阵的逆平方根
+        rowsum = np.array(adj_.sum(1))
+        degree_mat_inv_sqrt = sp.diags(np.power(rowsum, -0.5).flatten())
+
+        # 进行归一化：D^(-1/2) * A * D^(-1/2)
+        adj_normalized = adj_.dot(degree_mat_inv_sqrt).transpose().dot(degree_mat_inv_sqrt).tocoo()
+
+        # 转换为稠密矩阵并添加到列表中
+        adj_normalized_dense = torch.FloatTensor(adj_normalized.toarray())
+        adj_normalized_list.append(adj_normalized_dense)
+
+    # 将所有的稠密张量堆叠成一个形状为 (batch_size, n, n) 的张量
+    adj_normalized_tensor = torch.stack(adj_normalized_list, dim=0)
+
+    return adj_normalized_tensor
+
 
 def sparse_mx_to_torch_sparse_tensor(sparse_mx):
     """Convert a scipy sparse matrix to a torch sparse tensor."""
@@ -365,6 +397,7 @@ def get_roc_score_batches(emb, adj_orig):
         adj_rec = np.dot(emb[i], emb[i].T)
         
         # 从原始邻接矩阵中获取正样本和负样本的边
+        #edges_pos的最终输出维度是（m,2），每一行表示i存在一个连接的边的位置，包含其行列索引
         edges_pos = np.array(np.where(adj_orig[i] == 1)).T  # 正样本
         edges_neg = np.array(np.where(adj_orig[i] == 0)).T  # 负样本
         
@@ -372,8 +405,8 @@ def get_roc_score_batches(emb, adj_orig):
         preds = []
         pos = []
         for e in edges_pos:
-            preds.append(sigmoid(adj_rec[e[0], e[1]]))
-            pos.append(adj_orig[i, e[0], e[1]])
+            preds.append(sigmoid(adj_rec[e[0], e[1]]))#这里是找到之前有连接的边，然后看预测结果，存在preds里
+            pos.append(adj_orig[i, e[0], e[1]]) #i是对应第i个被试的标签
         
         # 对负样本边进行预测
         preds_neg = []
@@ -387,6 +420,18 @@ def get_roc_score_batches(emb, adj_orig):
         labels_all = np.hstack([np.ones(len(preds)), np.zeros(len(preds_neg))])
         
         # 计算 ROC AUC 和 AP 分数
+        #roc_auc_score 是用于计算ROC曲线下面积（AUC，Area Under the Curve）的指标。它常用于二分类任务中，用来评估分类模型的性能。
+        #概念解释：
+        #•ROC曲线（Receiver Operating Characteristic Curve）：是一条通过改变分类阈值得到的图形，横轴是 假阳性率 (FPR: False Positive Rate)，纵轴是 真阳性率 (TPR: True Positive Rate)。
+            #•AUC (Area Under the Curve)：是ROC曲线下方的面积。AUC的取值范围在0和1之间。
+            #•AUC=1：表示模型完美分类。
+            #•AUC=0.5：表示模型分类没有区分能力（类似随机猜测）。
+            #•AUC<0.5：表示模型的分类效果比随机猜测还差。
+        #roc_auc_score 的用法：
+            #在Python中，roc_auc_score 通常在 scikit-learn 中使用。使用时需要两个主要输入参数：
+                #•y_true：真实标签（0或1）。
+                #•y_score：模型输出的预测概率（或决策函数的得分）。
+
         roc_score = roc_auc_score(labels_all, preds_all)
         ap_score = average_precision_score(labels_all, preds_all)
         
