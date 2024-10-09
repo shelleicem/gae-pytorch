@@ -8,7 +8,7 @@ import numpy as np
 import scipy.sparse as sp
 import torch
 from torch import optim
-
+from torch.utils.data import DataLoader, TensorDataset
 
 import sys
 
@@ -17,7 +17,7 @@ sys.path.append('/root/autodl-tmp/.autodl/graph_link_prediction/graph_link_predi
 
 from gae.modelmulti import GCNModelVAE
 from gae.optimizer import loss_function_batches
-from gae.utils import load_data, mask_test_edges, preprocess_graph, get_roc_score
+from gae.utils import load_and_save_data, mask_test_edges, preprocess_graph_batches, get_roc_score_batches
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--model', type=str, default='gcn_vae', help="models used")
@@ -28,7 +28,7 @@ parser.add_argument('--hidden2', type=int, default=16, help='Number of units in 
 parser.add_argument('--lr', type=float, default=0.01, help='Initial learning rate.')
 parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
 parser.add_argument('--dataset-str', type=str, default='myUKB_FC', help='type of dataset.')
-parser.add_argument("--data-path", type=str, default="/root/autodl-tmp/.autodl/Y68p_FC_2_0.npy", help="path to the dataset")
+parser.add_argument("--data-path", type=str, default="/root/autodl-tmp/.autodl/data.npz", help="path to the dataset")
 
 args = parser.parse_args()
 
@@ -53,7 +53,7 @@ def gae_for(args):
     adj_train_orig = torch.FloatTensor(adj_train)  # (train_p, n, n)
 
     # 设置训练集邻接矩阵为输入
-    adj_norm = preprocess_graph(adj_train_orig)  # 对每个被试的邻接矩阵进行归一化
+    adj_norm = preprocess_graph_batches(adj_train_orig)  # 对每个被试的邻接矩阵进行归一化
 
     # 构造训练时的标签矩阵，包括自连接
     #torch.eye是单位矩阵
@@ -75,44 +75,52 @@ def gae_for(args):
     # 初始化 GCN-VAE 模型，使用输入特征维度、隐藏层维度和 dropout 参数
     model = GCNModelVAE(feat_dim, args.hidden1, args.hidden2, args.dropout)
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    
+    # 将训练集的特征和邻接矩阵标签转换为 TensorDataset，以便于 DataLoader 加载
+    # 假设 features 的维度是 (p, n, d)，adj_norm 和 adj_label 的维度是 (p, n, n)
+    train_features = features[:adj_train.shape[0]]  # 选择训练部分的特征
+    # 创建 TensorDataset
+    dataset = TensorDataset(train_features, adj_norm, adj_label)
+    batch_size = 32  # 定义 batch size，可以根据内存大小进行调整
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # 开始训练循环
     for epoch in range(args.epochs):
         t = time.time()
         model.train()
-        optimizer.zero_grad()
 
-        # 前向传播，得到重构的邻接矩阵 (recovered) 和编码器输出的均值 (mu) 及对数方差 (logvar)
-        # 在这里，我们输入的是整个训练集的 features 和邻接矩阵
-        recovered, mu, logvar = model(features[:adj_train.shape[0]], adj_norm)
-        
-        
-        # 计算变分自编码器的损失，包括重构损失和 KL 散度
-        #adj_label是n*n的
-        loss = loss_function_batches(preds=recovered, labels=adj_label,
-                             mu=mu, logvar=logvar, n_nodes=n_nodes,
-                             norm=norm, pos_weight=pos_weight)
-        loss.backward()
-        cur_loss = loss.item()
-        optimizer.step()
+        epoch_loss = 0  # 用于累计每一个epoch总损失
+        for batch_idx, (batch_features, batch_adj_norm, batch_adj_label) in enumerate(dataloader):
+            optimizer.zero_grad()
 
-        # 将隐空间的均值表示转换为 numpy 数组，便于后续评估
-        #hidden_emb = mu.data.numpy()
-        
+            # 前向传播，得到重构的邻接矩阵 (recovered) 和编码器输出的均值 (mu) 及对数方差 (logvar)
+            # 在这里，我们输入的是每个批次的 features 和对应的 adj_norm
+            recovered, mu, logvar = model(batch_features, batch_adj_norm)
 
-         # 打印当前 epoch 的训练损失
-        print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(cur_loss),
-              "time=", "{:.5f}".format(time.time() - t)
-              )
+            # 计算变分自编码器的损失，包括重构损失和 KL 散度
+            loss = loss_function_batches(preds=recovered, labels=batch_adj_label,
+                                     mu=mu, logvar=logvar, n_nodes=batch_adj_label.shape[1],
+                                     norm=norm, pos_weight=pos_weight)
+            loss.backward()
+            optimizer.step()
+
+            # 累加每个批次的损失
+            epoch_loss += loss.item()
+
+        # 打印当前 epoch 的平均训练损失
+        avg_epoch_loss = epoch_loss / len(dataloader)
+        print("Epoch:", '%04d' % (epoch + 1), "train_loss=", "{:.5f}".format(avg_epoch_loss),
+          "time=", "{:.5f}".format(time.time() - t))
 
         # 验证集评估
-        val_roc_scores, val_ap_scores = evaluate_model_on_data(model,features[adj_train.shape[0]:adj_train.shape[0] + adj_val.shape[0]], adj_val)
+        val_roc_scores, val_ap_scores = evaluate_model_on_data(
+        model,
+        features[adj_train.shape[0]:adj_train.shape[0] + adj_val.shape[0]],
+        adj_val)
         # 计算均值
         val_avg_roc_score = np.mean(val_roc_scores)
         val_avg_ap_score = np.mean(val_ap_scores)
         print("val_roc=", "{:.5f}".format(val_avg_roc_score), "val_ap=", "{:.5f}".format(val_avg_ap_score))
-        
-
     print("Optimization Finished!")
 
     # 测试集评估
@@ -133,10 +141,14 @@ def evaluate_model_on_data(model, features, adj_input):
     """
     model.eval()  # 设置模型为评估模式
 
+    # 如果 adj_input 是 NumPy 数组，将其转换为 PyTorch 张量
+    if isinstance(adj_input, np.ndarray):
+        adj_input = torch.FloatTensor(adj_input)
+
     # 对输入邻接矩阵进行归一化处理
-    adj_norm = preprocess_graph(torch.FloatTensor(adj_input))
+    adj_norm = preprocess_graph_batches(adj_input)
+    # 构造标签矩阵，添加自连接
     adj_label = adj_input + torch.eye(adj_input.shape[1]).unsqueeze(0).repeat(adj_input.shape[0], 1, 1)
-    adj_label = torch.FloatTensor(adj_label)
 
     with torch.no_grad():
         # 前向传播得到重构后的邻接矩阵 (recovered) 和潜在表示 (mu)
@@ -146,11 +158,11 @@ def evaluate_model_on_data(model, features, adj_input):
     emb = mu.data.numpy()
 
     # 调用 get_roc_score 函数，自动从 adj_input 中生成正负样本边，并对每个被试计算 ROC 和 AP
-    roc_scores, ap_scores = get_roc_score_batches(emb, adj_input)
+    #对于rocscores以及apscores的计算方式，可以步入函数中去了解，有一个文档
+    roc_scores, ap_scores = get_roc_score_batches(emb, adj_input.numpy())
     
     # 返回每个被试的 ROC AUC 和 AP 分数列表
     return roc_scores, ap_scores
-
 
 
 
@@ -231,6 +243,7 @@ def evaluate_model_on_data(model, features, adj_input):
 #     print('Test AP score: ' + str(ap_score))
 
 if __name__ == '__main__':
+    #load_and_save_data("/root/autodl-tmp/.autodl/Y68p_FC_2_0.npy",)
     gae_for(args)
 
 # 问题1：我的疑问是这个模型输出的结果是什么？是一个重新生成的邻接矩阵嘛？
