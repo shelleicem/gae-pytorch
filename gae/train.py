@@ -19,18 +19,18 @@ from gae.modelmulti import GCNModelVAE
 from gae.optimizer import loss_function_batches
 from gae.utils import load_and_save_data, mask_test_edges, preprocess_graph_batches, get_roc_score_batches
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--model', type=str, default='gcn_vae', help="models used")
-parser.add_argument('--seed', type=int, default=42, help='Random seed.')
-parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train.')
-parser.add_argument('--hidden1', type=int, default=32, help='Number of units in hidden layer 1.')
-parser.add_argument('--hidden2', type=int, default=16, help='Number of units in hidden layer 2.')
-parser.add_argument('--lr', type=float, default=0.01, help='Initial learning rate.')
-parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
-parser.add_argument('--dataset-str', type=str, default='myUKB_FC', help='type of dataset.')
-parser.add_argument("--data-path", type=str, default="/root/autodl-tmp/.autodl/data.npz", help="path to the dataset")
+# parser = argparse.ArgumentParser()
+# parser.add_argument('--model', type=str, default='gcn_vae', help="models used")
+# parser.add_argument('--seed', type=int, default=42, help='Random seed.')
+# parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train.')
+# parser.add_argument('--hidden1', type=int, default=32, help='Number of units in hidden layer 1.')
+# parser.add_argument('--hidden2', type=int, default=16, help='Number of units in hidden layer 2.')
+# parser.add_argument('--lr', type=float, default=0.01, help='Initial learning rate.')
+# parser.add_argument('--dropout', type=float, default=0., help='Dropout rate (1 - keep probability).')
+# parser.add_argument('--dataset-str', type=str, default='myUKB_FC', help='type of dataset.')
+# parser.add_argument("--data-path", type=str, default="/root/autodl-tmp/.autodl/data.npz", help="path to the dataset")
 
-args = parser.parse_args()
+# args = parser.parse_args()
 
 def gae_for(args):
     # 打印当前使用的数据集名称
@@ -131,7 +131,7 @@ def gae_for(args):
     print('Test ROC score: ' + str(test_avg_roc_score))
     print('Test AP score: ' + str(test_avg_ap_score))
 
-def evaluate_model_on_data(model, features, adj_input):
+def evaluate_model_on_data(model, features, adj_norm,adj_label,adj_orig):
     """
     对给定的输入邻接矩阵 adj_input 进行模型评估。
     :param model: 训练好的模型
@@ -140,15 +140,6 @@ def evaluate_model_on_data(model, features, adj_input):
     :return: 每个被试的 ROC AUC 和 AP 分数列表
     """
     model.eval()  # 设置模型为评估模式
-
-    # 如果 adj_input 是 NumPy 数组，将其转换为 PyTorch 张量
-    if isinstance(adj_input, np.ndarray):
-        adj_input = torch.FloatTensor(adj_input)
-
-    # 对输入邻接矩阵进行归一化处理
-    adj_norm = preprocess_graph_batches(adj_input)
-    # 构造标签矩阵，添加自连接
-    adj_label = adj_input + torch.eye(adj_input.shape[1]).unsqueeze(0).repeat(adj_input.shape[0], 1, 1)
 
     with torch.no_grad():
         # 前向传播得到重构后的邻接矩阵 (recovered) 和潜在表示 (mu)
@@ -159,8 +150,8 @@ def evaluate_model_on_data(model, features, adj_input):
 
     # 调用 get_roc_score 函数，自动从 adj_input 中生成正负样本边，并对每个被试计算 ROC 和 AP
     #对于rocscores以及apscores的计算方式，可以步入函数中去了解，有一个文档
-    roc_scores, ap_scores = get_roc_score_batches(emb, adj_input.numpy())
-    
+    roc_scores, ap_scores = get_roc_score_batches(emb, adj_orig.numpy())
+    #这里必须用adj_orig.numpy()，因为adj_orig是0、1的。
     # 返回每个被试的 ROC AUC 和 AP 分数列表
     return roc_scores, ap_scores
 
