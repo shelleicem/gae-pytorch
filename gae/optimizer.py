@@ -78,7 +78,34 @@ def loss_function(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
 # 	•	取 mean 能够确保模型训练过程中的梯度更新稳定，损失值尺度一致，从而有助于选择合适的学习率并提高训练效果。
 # 	•	在你的任务中，考虑到模型是对多个被试的数据进行训练，使用 mean 可以确保不同 batch_size 下的训练效果一致，进而提高模型的泛化能力和训练稳定性。
 
-def loss_function_batches(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
+# def loss_function_batches(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
+#     """
+#     计算批量情况下的损失函数，包括重构损失和 KL 散度。
+#     :param preds: 重构后的邻接矩阵 (batch_size, n, n)
+#     :param labels: 原始邻接矩阵 (batch_size, n, n)
+#     :param mu: 编码器输出的均值 (batch_size, n, hidden_dim)
+#     :param logvar: 编码器输出的对数方差 (batch_size, n, hidden_dim)
+#     :param n_nodes: 图中节点的数量
+#     :param norm: 用于归一化的因子
+#     :param pos_weight: 正样本权重，用于平衡二值交叉熵损失
+#     :return: 重构损失 + KL 散度的总损失
+#     """
+#     # 计算重构损失，使用 binary_cross_entropy_with_logits 并考虑 batch_size
+#     cost = norm * F.binary_cross_entropy_with_logits(
+#         preds, labels, pos_weight=pos_weight, reduction='mean'
+#     )
+
+#     # 计算 KL 散度，使用批量维度进行计算
+#     # KL 散度公式：0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+#     # 对每个样本的 KL 散度取平均值
+#     KLD = -0.5 / n_nodes * torch.mean(
+#         torch.sum(1 + 2 * logvar - mu.pow(2) - logvar.exp().pow(2), dim=[1, 2])
+#     )
+
+#     return cost + KLD
+
+
+def loss_function_batches(preds, labels, mu, logvar, n_nodes, norms, pos_weights):
     """
     计算批量情况下的损失函数，包括重构损失和 KL 散度。
     :param preds: 重构后的邻接矩阵 (batch_size, n, n)
@@ -86,14 +113,22 @@ def loss_function_batches(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
     :param mu: 编码器输出的均值 (batch_size, n, hidden_dim)
     :param logvar: 编码器输出的对数方差 (batch_size, n, hidden_dim)
     :param n_nodes: 图中节点的数量
-    :param norm: 用于归一化的因子
-    :param pos_weight: 正样本权重，用于平衡二值交叉熵损失
+    :param norms: 每个被试的归一化因子列表 (batch_size,)
+    :param pos_weights: 每个被试的正样本权重列表 (batch_size,)
     :return: 重构损失 + KL 散度的总损失
     """
-    # 计算重构损失，使用 binary_cross_entropy_with_logits 并考虑 batch_size
-    cost = norm * F.binary_cross_entropy_with_logits(
-        preds, labels, pos_weight=pos_weight, reduction='mean'
+    # 将 norms 和 pos_weights 转换为张量
+    norms = torch.tensor(norms, dtype=torch.float32, device=preds.device)
+    pos_weights = torch.tensor(pos_weights, dtype=torch.float32, device=preds.device)
+
+    # 计算重构损失，使用 binary_cross_entropy_with_logits，并考虑 pos_weight 的广播
+    # 使用 reduction='none' 保留每个样本的损失，然后通过 norms 进行加权
+    bce_loss = F.binary_cross_entropy_with_logits(
+        preds, labels, pos_weight=pos_weights.view(-1, 1, 1), reduction='none'
     )
+
+    # 对每个样本的损失进行加权和平均
+    weighted_bce_loss = (bce_loss.mean(dim=(1, 2)) * norms).mean()
 
     # 计算 KL 散度，使用批量维度进行计算
     # KL 散度公式：0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
@@ -102,4 +137,5 @@ def loss_function_batches(preds, labels, mu, logvar, n_nodes, norm, pos_weight):
         torch.sum(1 + 2 * logvar - mu.pow(2) - logvar.exp().pow(2), dim=[1, 2])
     )
 
-    return cost + KLD
+    # 返回总损失，包括重构损失和 KL 散度
+    return weighted_bce_loss + KLD
