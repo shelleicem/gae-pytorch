@@ -7,7 +7,38 @@ import torch
 import os
 from sklearn.metrics import roc_auc_score, average_precision_score
 
+#写于2024年10月10日，用于计算个体化的正样本权重和归一化参数
+def calculate_posweights_per_subject(adj_train_orig):
+    """
+    为每个被试计算 pos_weight 和 norm。
 
+    参数:
+    adj_train_orig (numpy.ndarray): 形状为 (p, n, n) 的张量，其中 p 是被试数量，n 是节点数量。
+
+    返回:
+    pos_weights (list): 每个被试的 pos_weight 列表。
+    norms (list): 每个被试的 norm 列表。
+    """
+    p = adj_train_orig.shape[0]  # 被试数量
+    n_nodes = adj_train_orig.shape[1]
+
+    # 初始化每个被试的 pos_weight 和 norm 的列表
+    pos_weights = []
+    norms = []
+
+    for i in range(p):
+        # 对每个被试单独计算正样本数和负样本数
+        positive = adj_train_orig[i].sum()  # 当前被试的正样本数（连接的边数）
+        negative = n_nodes * n_nodes - positive  # 当前被试的负样本数（所有连接对数 - 正样本数）
+
+        # 计算当前被试的 pos_weight 和 norm
+        pos_weight = float(negative) / positive if positive > 0 else 0.0
+        norm = n_nodes * n_nodes / float(negative * 2) if negative > 0 else 0.0
+
+        pos_weights.append(pos_weight)
+        norms.append(norm)
+
+    return pos_weights, norms
 # 写于2024年10月8日，用于代替原有的 load_data 函数
 import numpy as np
 import os
@@ -442,7 +473,51 @@ def get_roc_score_batches(emb, adj_orig):
     # 返回每个被试的 ROC AUC 和 AP 分数列表
     return roc_scores, ap_scores
 
+def get_roc_score_batches_accelerated(emb, adj_orig):
+    """
+    计算每个被试的 ROC AUC 和 AP 分数，并返回每个被试的结果。
+    :param emb: 批量的潜在表示 (batch_size, n, hidden_dim)
+    :param adj_orig: 原始邻接矩阵 (batch_size, n, n)
+    :return: 每个被试的 ROC AUC 和 AP 分数列表
+    """
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))
+    
+    batch_size = emb.shape[0]
+    roc_scores = []
+    ap_scores = []
 
+    # 对每个被试的图分别计算 ROC AUC 和 AP
+    for i in range(batch_size):
+        # 计算第 i 个图的重建邻接矩阵
+        adj_rec = np.dot(emb[i], emb[i].T)
+        
+        # 获取正样本和随机采样的负样本的边
+        edges_pos = np.array(np.where(adj_orig[i] == 1)).T  # 正样本
+        edges_neg = np.array(np.where(adj_orig[i] == 0)).T  # 负样本
+
+        # 对正样本和负样本进行批量预测
+        pos_indices = tuple(edges_pos.T)
+        preds_pos = sigmoid(adj_rec[pos_indices])
+        
+        num_neg_samples = min(len(edges_pos), len(edges_neg))
+        sampled_neg_indices = edges_neg[np.random.choice(len(edges_neg), size=num_neg_samples, replace=False)]
+        neg_indices = tuple(sampled_neg_indices.T)
+        preds_neg = sigmoid(adj_rec[neg_indices])
+
+        # 合并正负样本的预测值和标签
+        preds_all = np.concatenate([preds_pos, preds_neg])
+        labels_all = np.concatenate([np.ones(len(preds_pos)), np.zeros(len(preds_neg))])
+        
+        # 计算 ROC AUC 和 AP 分数
+        roc_score = roc_auc_score(labels_all, preds_all)
+        ap_score = average_precision_score(labels_all, preds_all)
+        
+        # 存储每个被试的结果
+        roc_scores.append(roc_score)
+        ap_scores.append(ap_score)
+    
+    return roc_scores, ap_scores
 
 # 问题1:mask_test_edges中验证集和测试集是怎么样的？
 # 1. 验证集和测试集的正样本（val_edges 和 test_edges）
